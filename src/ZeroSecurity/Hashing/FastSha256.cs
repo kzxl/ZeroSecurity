@@ -6,10 +6,12 @@ namespace ZeroSecurity.Hashing;
 /// <summary>
 /// Pure C#, zero-allocation implementation of the SHA-256 (FIPS 180-4) cryptographic hash algorithm.
 /// Operates directly on ReadOnlySpan and outputs into Span with zero GC heap pressure.
+/// Supports both one-shot and incremental streaming hashing.
 /// </summary>
 public static class FastSha256
 {
     public const int HashSizeInBytes = 32;
+    public const int BlockSizeInBytes = 64;
 
     private static readonly uint[] K =
     {
@@ -28,68 +30,10 @@ public static class FastSha256
     /// </summary>
     public static void Hash(ReadOnlySpan<byte> source, Span<byte> destination)
     {
-        if (destination.Length < HashSizeInBytes)
-            throw new ArgumentException("Destination span must be at least 32 bytes.", nameof(destination));
-
-        uint h0 = 0x6a09e667;
-        uint h1 = 0xbb67ae85;
-        uint h2 = 0x3c6ef372;
-        uint h3 = 0xa54ff53a;
-        uint h4 = 0x510e527f;
-        uint h5 = 0x9b05688c;
-        uint h6 = 0x1f83d9ab;
-        uint h7 = 0x5be0cd19;
-
-        Span<uint> w = stackalloc uint[64];
-        Span<byte> block = stackalloc byte[64];
-
-        long totalBytes = source.Length;
-        int offset = 0;
-
-        // Process full 64-byte chunks
-        while (offset + 64 <= source.Length)
-        {
-            ProcessBlock(source.Slice(offset, 64), w, ref h0, ref h1, ref h2, ref h3, ref h4, ref h5, ref h6, ref h7);
-            offset += 64;
-        }
-
-        // Padding
-        int remaining = source.Length - offset;
-        source.Slice(offset, remaining).CopyTo(block);
-        block[remaining] = 0x80;
-
-        if (remaining >= 56)
-        {
-            block.Slice(remaining + 1).Clear();
-            ProcessBlock(block, w, ref h0, ref h1, ref h2, ref h3, ref h4, ref h5, ref h6, ref h7);
-            block.Clear();
-        }
-        else
-        {
-            block.Slice(remaining + 1, 56 - (remaining + 1)).Clear();
-        }
-
-        ulong totalBits = (ulong)totalBytes * 8UL;
-        block[56] = (byte)(totalBits >> 56);
-        block[57] = (byte)(totalBits >> 48);
-        block[58] = (byte)(totalBits >> 40);
-        block[59] = (byte)(totalBits >> 32);
-        block[60] = (byte)(totalBits >> 24);
-        block[61] = (byte)(totalBits >> 16);
-        block[62] = (byte)(totalBits >> 8);
-        block[63] = (byte)(totalBits);
-
-        ProcessBlock(block, w, ref h0, ref h1, ref h2, ref h3, ref h4, ref h5, ref h6, ref h7);
-
-        // Output in Big-Endian
-        WriteBigEndian(h0, destination.Slice(0, 4));
-        WriteBigEndian(h1, destination.Slice(4, 4));
-        WriteBigEndian(h2, destination.Slice(8, 4));
-        WriteBigEndian(h3, destination.Slice(12, 4));
-        WriteBigEndian(h4, destination.Slice(16, 4));
-        WriteBigEndian(h5, destination.Slice(20, 4));
-        WriteBigEndian(h6, destination.Slice(24, 4));
-        WriteBigEndian(h7, destination.Slice(28, 4));
+        Sha256Incremental inc = default;
+        inc.Init();
+        inc.Update(source);
+        inc.Final(destination);
     }
 
     /// <summary>
@@ -97,12 +41,127 @@ public static class FastSha256
     /// </summary>
     public static string HashHex(ReadOnlySpan<byte> source)
     {
-        Span<byte> hash = stackalloc byte[32];
+        Span<byte> hash = stackalloc byte[HashSizeInBytes];
         Hash(source, hash);
         return FastHex.ToHex(hash);
     }
 
-    private static void ProcessBlock(ReadOnlySpan<byte> block, Span<uint> w,
+    /// <summary>
+    /// Zero-allocation, stack-allocated incremental SHA-256 streaming state.
+    /// </summary>
+    public unsafe struct Sha256Incremental
+    {
+        private uint _h0, _h1, _h2, _h3, _h4, _h5, _h6, _h7;
+        private ulong _totalBytes;
+        private int _bufferLen;
+        private fixed byte _buffer[64];
+
+        public void Init()
+        {
+            _h0 = 0x6a09e667;
+            _h1 = 0xbb67ae85;
+            _h2 = 0x3c6ef372;
+            _h3 = 0xa54ff53a;
+            _h4 = 0x510e527f;
+            _h5 = 0x9b05688c;
+            _h6 = 0x1f83d9ab;
+            _h7 = 0x5be0cd19;
+            _totalBytes = 0;
+            _bufferLen = 0;
+        }
+
+        public void Update(ReadOnlySpan<byte> data)
+        {
+            if (data.IsEmpty) return;
+            _totalBytes += (ulong)data.Length;
+
+            int offset = 0;
+            fixed (byte* bufPtr = _buffer)
+            {
+                if (_bufferLen > 0)
+                {
+                    int toCopy = Math.Min(64 - _bufferLen, data.Length);
+                    for (int i = 0; i < toCopy; i++)
+                    {
+                        bufPtr[_bufferLen + i] = data[i];
+                    }
+                    _bufferLen += toCopy;
+                    offset += toCopy;
+
+                    if (_bufferLen == 64)
+                    {
+                        Span<uint> w = stackalloc uint[64];
+                        ProcessBlock(new ReadOnlySpan<byte>(bufPtr, 64), w, ref _h0, ref _h1, ref _h2, ref _h3, ref _h4, ref _h5, ref _h6, ref _h7);
+                        _bufferLen = 0;
+                    }
+                }
+
+                Span<uint> wBlock = stackalloc uint[64];
+                while (offset + 64 <= data.Length)
+                {
+                    ProcessBlock(data.Slice(offset, 64), wBlock, ref _h0, ref _h1, ref _h2, ref _h3, ref _h4, ref _h5, ref _h6, ref _h7);
+                    offset += 64;
+                }
+
+                int rem = data.Length - offset;
+                if (rem > 0)
+                {
+                    for (int i = 0; i < rem; i++)
+                    {
+                        bufPtr[i] = data[offset + i];
+                    }
+                    _bufferLen = rem;
+                }
+            }
+        }
+
+        public void Final(Span<byte> destination)
+        {
+            if (destination.Length < HashSizeInBytes)
+                throw new ArgumentException("Destination span must be at least 32 bytes.", nameof(destination));
+
+            fixed (byte* bufPtr = _buffer)
+            {
+                Span<byte> block = new Span<byte>(bufPtr, 64);
+                Span<uint> w = stackalloc uint[64];
+
+                block[_bufferLen] = 0x80;
+                if (_bufferLen >= 56)
+                {
+                    block.Slice(_bufferLen + 1).Clear();
+                    ProcessBlock(block, w, ref _h0, ref _h1, ref _h2, ref _h3, ref _h4, ref _h5, ref _h6, ref _h7);
+                    block.Clear();
+                }
+                else
+                {
+                    block.Slice(_bufferLen + 1, 56 - (_bufferLen + 1)).Clear();
+                }
+
+                ulong totalBits = _totalBytes * 8UL;
+                block[56] = (byte)(totalBits >> 56);
+                block[57] = (byte)(totalBits >> 48);
+                block[58] = (byte)(totalBits >> 40);
+                block[59] = (byte)(totalBits >> 32);
+                block[60] = (byte)(totalBits >> 24);
+                block[61] = (byte)(totalBits >> 16);
+                block[62] = (byte)(totalBits >> 8);
+                block[63] = (byte)(totalBits);
+
+                ProcessBlock(block, w, ref _h0, ref _h1, ref _h2, ref _h3, ref _h4, ref _h5, ref _h6, ref _h7);
+
+                WriteBigEndian(_h0, destination.Slice(0, 4));
+                WriteBigEndian(_h1, destination.Slice(4, 4));
+                WriteBigEndian(_h2, destination.Slice(8, 4));
+                WriteBigEndian(_h3, destination.Slice(12, 4));
+                WriteBigEndian(_h4, destination.Slice(16, 4));
+                WriteBigEndian(_h5, destination.Slice(20, 4));
+                WriteBigEndian(_h6, destination.Slice(24, 4));
+                WriteBigEndian(_h7, destination.Slice(28, 4));
+            }
+        }
+    }
+
+    internal static void ProcessBlock(ReadOnlySpan<byte> block, Span<uint> w,
         ref uint h0, ref uint h1, ref uint h2, ref uint h3,
         ref uint h4, ref uint h5, ref uint h6, ref uint h7)
     {

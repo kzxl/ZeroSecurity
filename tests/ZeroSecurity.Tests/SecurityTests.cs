@@ -2,6 +2,7 @@ using System;
 using System.Text;
 using Xunit;
 using ZeroSecurity.Anomaly;
+using ZeroSecurity.Common;
 using ZeroSecurity.Crypto;
 using ZeroSecurity.Hashing;
 using ZeroSecurity.Matching;
@@ -189,4 +190,201 @@ public class SecurityTests
         bool tamperOk = ChaCha20Poly1305.Decrypt(key, nonce, aad, ciphertext, tag, failBuffer);
         Assert.False(tamperOk);
     }
+
+    [Fact]
+    public void CryptoMemory_SecureZeroAndConstantTimeEquals_BehavesCorrectly()
+    {
+        byte[] buffer = { 1, 2, 3, 4, 5, 6, 7, 8 };
+        CryptoMemory.SecureZero(buffer);
+        Assert.All(buffer, b => Assert.Equal(0, b));
+
+        byte[] a = { 10, 20, 30, 40 };
+        byte[] b = { 10, 20, 30, 40 };
+        byte[] c = { 10, 20, 30, 41 };
+
+        Assert.True(CryptoMemory.ConstantTimeEquals(a, b));
+        Assert.False(CryptoMemory.ConstantTimeEquals(a, c));
+    }
+
+    [Fact]
+    public void HmacSha256_Rfc4231_KnownTestVectors()
+    {
+        // RFC 4231 Test Case 1:
+        // Key: 0x0b repeated 20 times
+        // Data: "Hi There"
+        // Expected: b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7
+        byte[] key1 = new byte[20];
+        for (int i = 0; i < key1.Length; i++) key1[i] = 0x0b;
+        byte[] data1 = Encoding.UTF8.GetBytes("Hi There");
+        string hmac1 = HmacSha256.HashHex(key1, data1);
+        Assert.Equal("b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7", hmac1);
+
+        // RFC 4231 Test Case 2:
+        // Key: "Jefe"
+        // Data: "what do ya want for nothing?"
+        // Expected: 5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843
+        byte[] key2 = Encoding.UTF8.GetBytes("Jefe");
+        byte[] data2 = Encoding.UTF8.GetBytes("what do ya want for nothing?");
+        string hmac2 = HmacSha256.HashHex(key2, data2);
+        Assert.Equal("5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843", hmac2);
+
+        // RFC 4231 Test Case 6 (Key > 64 bytes):
+        // Key: 0xaa repeated 131 times
+        // Data: "Test Using Larger Than Block-Size Key - Hash Key First"
+        // Expected: 60e431591ee0b67f0d8a26aacbf5b77f8e0bc621372b0713fedad64e01f930ac
+        byte[] key6 = new byte[131];
+        for (int i = 0; i < key6.Length; i++) key6[i] = 0xaa;
+        byte[] data6 = Encoding.UTF8.GetBytes("Test Using Larger Than Block-Size Key - Hash Key First");
+        string hmac6 = HmacSha256.HashHex(key6, data6);
+        using var bcl6 = new System.Security.Cryptography.HMACSHA256(key6);
+        string expected6 = FastHex.ToHex(bcl6.ComputeHash(data6));
+        Assert.Equal(expected6, hmac6);
+    }
+
+    [Fact]
+    public void Hkdf_Rfc5869_TestVectors()
+    {
+        // RFC 5869 Test Case 1:
+        // IKM = 0x0b repeated 22 times
+        // Salt = 0x000102030405060708090a0b0c (13 bytes)
+        // Info = 0xf0f1f2f3f4f5f6f7f8f9 (10 bytes)
+        // L = 42 bytes
+        byte[] ikm = new byte[22];
+        for (int i = 0; i < ikm.Length; i++) ikm[i] = 0x0b;
+
+        byte[] salt = { 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c };
+        byte[] info = { 0xf0, 0xf1, 0xf2, 0xf3, 0xf4, 0xf5, 0xf6, 0xf7, 0xf8, 0xf9 };
+
+        Span<byte> prk = stackalloc byte[32];
+        Hkdf.Extract(salt, ikm, prk);
+        Assert.Equal("077709362c2e32df0ddc3f0dc47bba6390b6c73bb50f9c3122ec844ad7c2b3e5", FastHex.ToHex(prk));
+
+        Span<byte> okm = stackalloc byte[42];
+        Hkdf.Expand(prk, info, okm);
+        byte[] bclOkm = System.Security.Cryptography.HKDF.Expand(System.Security.Cryptography.HashAlgorithmName.SHA256, prk.ToArray(), 42, info);
+        Assert.Equal(FastHex.ToHex(bclOkm), FastHex.ToHex(okm));
+
+        // One-step DeriveKey
+        Span<byte> derived = stackalloc byte[42];
+        Hkdf.DeriveKey(salt, ikm, info, derived);
+        Assert.Equal(FastHex.ToHex(bclOkm), FastHex.ToHex(derived));
+    }
+
+    [Fact]
+    public void Pbkdf2_MatchesStandardBclImplementation()
+    {
+        byte[] salt = Encoding.UTF8.GetBytes("salt");
+
+        // 1 iteration
+        Span<byte> dk1 = stackalloc byte[32];
+        Pbkdf2.DeriveKey("password", salt, 1, dk1);
+        byte[] bcl1 = System.Security.Cryptography.Rfc2898DeriveBytes.Pbkdf2("password", salt, 1, System.Security.Cryptography.HashAlgorithmName.SHA256, 32);
+        Assert.Equal(FastHex.ToHex(bcl1), FastHex.ToHex(dk1));
+
+        // 2 iterations
+        Span<byte> dk2 = stackalloc byte[32];
+        Pbkdf2.DeriveKey("password", salt, 2, dk2);
+        byte[] bcl2 = System.Security.Cryptography.Rfc2898DeriveBytes.Pbkdf2("password", salt, 2, System.Security.Cryptography.HashAlgorithmName.SHA256, 32);
+        Assert.Equal(FastHex.ToHex(bcl2), FastHex.ToHex(dk2));
+
+        // 4096 iterations
+        Span<byte> dk4096 = stackalloc byte[32];
+        Pbkdf2.DeriveKey("password", salt, 4096, dk4096);
+        byte[] bcl4096 = System.Security.Cryptography.Rfc2898DeriveBytes.Pbkdf2("password", salt, 4096, System.Security.Cryptography.HashAlgorithmName.SHA256, 32);
+        Assert.Equal(FastHex.ToHex(bcl4096), FastHex.ToHex(dk4096));
+    }
+
+    [Fact]
+    public void X25519_Rfc7748_TestVectors_AndSharedSecretAgreement()
+    {
+        // RFC 7748 Section 6.1:
+        // Alice private key:
+        byte[] alicePriv = new byte[32];
+        FastHex.TryDecode("77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a".AsSpan(), alicePriv, out _);
+
+        Span<byte> alicePub = stackalloc byte[32];
+        X25519.GetPublicKey(alicePriv, alicePub);
+        Assert.Equal("8520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a", FastHex.ToHex(alicePub));
+
+        // Bob private key:
+        byte[] bobPriv = new byte[32];
+        FastHex.TryDecode("5dab087e624a8a4b79e17f8b83800ee66f3bb1292618b6fd1c2f8b27ff88e0eb".AsSpan(), bobPriv, out _);
+
+        Span<byte> bobPub = stackalloc byte[32];
+        X25519.GetPublicKey(bobPriv, bobPub);
+        Assert.Equal("de9edb7d7b7dc1b4d35b61c2ece435373f8343c85b78674dadfc7e146f882b4f", FastHex.ToHex(bobPub));
+
+        // Mutual Key Agreement:
+        Span<byte> sharedAlice = stackalloc byte[32];
+        Span<byte> sharedBob = stackalloc byte[32];
+
+        X25519.Agree(alicePriv, bobPub, sharedAlice);
+        X25519.Agree(bobPriv, alicePub, sharedBob);
+
+        string expectedShared = "4a5d9d5ba4ce2de1728e3bf480350f25e07e21c947d19e3376f09b3c1e161742";
+        Assert.Equal(expectedShared, FastHex.ToHex(sharedAlice));
+        Assert.Equal(expectedShared, FastHex.ToHex(sharedBob));
+    }
+
+    [Fact]
+    public void XChaCha20Poly1305_EncryptDecryptAndTamperResistance()
+    {
+        byte[] key = new byte[32];
+        byte[] nonce = new byte[24]; // 192-bit extended nonce
+        byte[] aad = Encoding.UTF8.GetBytes("IndustrialTelemetryHeader");
+        byte[] plaintext = Encoding.UTF8.GetBytes("CriticalEdgeControllerCommandPayload");
+
+        for (int i = 0; i < key.Length; i++) key[i] = (byte)(i + 7);
+        for (int i = 0; i < nonce.Length; i++) nonce[i] = (byte)(i + 13);
+
+        byte[] ciphertext = new byte[plaintext.Length];
+        byte[] tag = new byte[16];
+
+        // 1. Encrypt
+        XChaCha20Poly1305.Encrypt(key, nonce, aad, plaintext, ciphertext, tag);
+        Assert.NotEqual(plaintext, ciphertext);
+
+        // 2. Decrypt
+        byte[] decrypted = new byte[plaintext.Length];
+        bool ok = XChaCha20Poly1305.Decrypt(key, nonce, aad, ciphertext, tag, decrypted);
+        Assert.True(ok);
+        Assert.Equal(plaintext, decrypted);
+
+        // 3. Tamper with ciphertext
+        ciphertext[5] ^= 0x42;
+        byte[] failBuffer = new byte[plaintext.Length];
+        bool tamperOk = XChaCha20Poly1305.Decrypt(key, nonce, aad, ciphertext, tag, failBuffer);
+        Assert.False(tamperOk);
+    }
+
+    [Fact]
+    public void CuckooFilter_AddContainsDeleteAndSerialization()
+    {
+        var filter = new CuckooFilter(expectedElements: 5000);
+
+        filter.Add("c2.evil-attacker.org");
+        filter.Add("ransomware.exe.sha256");
+        filter.Add("192.168.1.50");
+
+        Assert.True(filter.Contains("c2.evil-attacker.org"));
+        Assert.True(filter.Contains("ransomware.exe.sha256"));
+        Assert.True(filter.Contains("192.168.1.50"));
+        Assert.False(filter.Contains("legitimate-host.net"));
+
+        // Delete test
+        bool deleted = filter.Delete("ransomware.exe.sha256");
+        Assert.True(deleted);
+        Assert.False(filter.Contains("ransomware.exe.sha256"));
+        Assert.True(filter.Contains("c2.evil-attacker.org")); // other entries untouched
+
+        // Serialization roundtrip
+        byte[] serialized = filter.ToByteArray();
+        var restored = CuckooFilter.FromByteArray(serialized);
+
+        Assert.True(restored.Contains("c2.evil-attacker.org"));
+        Assert.True(restored.Contains("192.168.1.50"));
+        Assert.False(restored.Contains("ransomware.exe.sha256"));
+        Assert.False(restored.Contains("legitimate-host.net"));
+    }
 }
+
