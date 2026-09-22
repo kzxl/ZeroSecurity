@@ -386,5 +386,117 @@ public class SecurityTests
         Assert.False(restored.Contains("ransomware.exe.sha256"));
         Assert.False(restored.Contains("legitimate-host.net"));
     }
+
+    [Fact]
+    public void SecureMemoryScope_AllocateAndZeroFilled_AutoWipesOnDispose()
+    {
+        SecureMemoryScope scope = new SecureMemoryScope(64);
+        Assert.Equal(64, scope.Length);
+        Assert.False(scope.IsDisposed);
+        unsafe
+        {
+            Assert.True(scope.Pointer != null);
+        }
+
+        // Must be zero-filled on creation
+        for (int i = 0; i < scope.Length; i++)
+        {
+            Assert.Equal(0, scope.Span[i]);
+        }
+
+        // Fill with secret
+        scope.Span.Fill(0xAA);
+        Assert.Equal(0xAA, scope.Span[0]);
+
+        // Dispose wipes and releases
+        scope.Dispose();
+        Assert.True(scope.IsDisposed);
+
+        // Operations throw ObjectDisposedException
+        Assert.Throws<ObjectDisposedException>(() => scope.Wipe());
+        Assert.Throws<ObjectDisposedException>(() => scope.ConstantTimeEquals(ReadOnlySpan<byte>.Empty));
+
+        // Double dispose is completely safe
+        scope.Dispose();
+    }
+
+    [Fact]
+    public void SecureMemoryScope_FromBytes_CopiesAndPreservesSecret()
+    {
+        byte[] secret = [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08];
+        using var scope = SecureMemoryScope.FromBytes(secret);
+
+        Assert.Equal(8, scope.Length);
+        Assert.True(scope.Span.SequenceEqual(secret));
+        Assert.True(scope.ConstantTimeEquals(secret));
+
+        byte[] different = [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x09];
+        Assert.False(scope.ConstantTimeEquals(different));
+
+        using var otherScope = SecureMemoryScope.FromBytes(secret);
+        Assert.True(scope.ConstantTimeEquals(otherScope));
+    }
+
+    [Fact]
+    public void SecureMemoryScope_FromChars_EncodesDirectlyWithoutManagedHeapLeak()
+    {
+        string secretText = "SovereignSecuritySecret123!";
+        using var scope = SecureMemoryScope.FromChars(secretText.AsSpan());
+
+        byte[] expectedBytes = Encoding.UTF8.GetBytes(secretText);
+        Assert.Equal(expectedBytes.Length, scope.Length);
+        Assert.True(scope.Span.SequenceEqual(expectedBytes));
+
+        // Test Wipe()
+        scope.Wipe();
+        for (int i = 0; i < scope.Length; i++)
+        {
+            Assert.Equal(0, scope.Span[i]);
+        }
+    }
+
+    [Fact]
+    public void SecureMemoryScope_FromHexString_DecodesAccurately()
+    {
+        string hex = "deadbeef01020304";
+        using var scope = SecureMemoryScope.FromHexString(hex.AsSpan());
+
+        Assert.Equal(8, scope.Length);
+        byte[] expected = [0xde, 0xad, 0xbe, 0xef, 0x01, 0x02, 0x03, 0x04];
+        Assert.True(scope.Span.SequenceEqual(expected));
+    }
+
+    [Fact]
+    public void CryptoMemory_ConstantTimeEquals_CharsAndStrings()
+    {
+        string token1 = "Bearer-eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9";
+        string token2 = "Bearer-eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9";
+        string token3 = "Bearer-eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJx"; // 1 char diff at end
+        string tokenShort = "Bearer-eyJhbG";
+
+        Assert.True(CryptoMemory.ConstantTimeEquals(token1.AsSpan(), token2.AsSpan()));
+        Assert.False(CryptoMemory.ConstantTimeEquals(token1.AsSpan(), token3.AsSpan()));
+        Assert.False(CryptoMemory.ConstantTimeEquals(token1.AsSpan(), tokenShort.AsSpan()));
+
+        Assert.True(CryptoMemory.ConstantTimeEquals(token1, token2));
+        Assert.False(CryptoMemory.ConstantTimeEquals(token1, token3));
+        Assert.False(CryptoMemory.ConstantTimeEquals(token1, (string?)null));
+        Assert.False(CryptoMemory.ConstantTimeEquals((string?)null, token2));
+        Assert.True(CryptoMemory.ConstantTimeEquals((string?)null, (string?)null));
+    }
+
+    [Fact]
+    public void CryptoMemory_SecureZero_Chars()
+    {
+        char[] password = "UltraSensitiveAdminPassword".ToCharArray();
+        Assert.NotEqual('\0', password[0]);
+
+        CryptoMemory.SecureZero(password.AsSpan());
+
+        for (int i = 0; i < password.Length; i++)
+        {
+            Assert.Equal('\0', password[i]);
+        }
+    }
 }
 

@@ -4,11 +4,11 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Zero External Dependencies](https://img.shields.io/badge/Dependencies-0%20External-brightgreen.svg)]()
 [![Multi-Targeting](https://img.shields.io/badge/.NET-8.0%20%7C%204.6.2%20%7C%20Standard%202.0-orange.svg)]()
-[![Tests: 16 Passed](https://img.shields.io/badge/Tests-16%20Passed%20(100%25)-brightgreen.svg)]()
+[![Tests: 22 Passed](https://img.shields.io/badge/Tests-22%20Passed%20(100%25)-brightgreen.svg)]()
 
 > **Architectural Standard**: 100% Pure C#, Zero External Dependencies, Multi-Targeting across `.NET 8.0`, `.NET Framework 4.6.2`, and `.NET Standard 2.0`.
 
-`ZeroSecurity` is the sovereign, high-throughput cryptographic and cyber-defense foundation of the **ZeroUniverse** ecosystem. It provides low-overhead, zero-allocation algorithms for asymmetric key agreement, authenticated symmetric encryption, key derivation, multi-pattern signature matching, IOC threat intelligence lookups, Shannon byte entropy, streaming UEBA anomaly mathematics, and constant-time memory hygiene.
+`ZeroSecurity` is the sovereign, high-throughput cryptographic and cyber-defense foundation of the **ZeroUniverse** ecosystem. It provides low-overhead, zero-allocation algorithms for asymmetric key agreement, authenticated symmetric encryption, key derivation, multi-pattern signature matching, IOC threat intelligence lookups, Shannon byte entropy, streaming UEBA anomaly mathematics, constant-time memory hygiene, and unmanaged secure credential lifetimes.
 
 ---
 
@@ -18,7 +18,8 @@
 ZeroSecurity/
 ├── Common/
 │   ├── FastHex.cs              # Zero-alloc span/pointer hex encoder and decoder
-│   └── CryptoMemory.cs         # Compiler-resistant SecureZero & branchless ConstantTimeEquals
+│   ├── CryptoMemory.cs         # Compiler-resistant SecureZero & branchless ConstantTimeEquals (byte, char, string)
+│   └── SecureMemoryScope.cs    # Unmanaged secure credential buffer with guaranteed zeroization on Dispose
 ├── Crypto/
 │   ├── X25519.cs               # Pure C# RFC 7748 Montgomery Curve25519 ECDH key exchange
 │   ├── ChaCha20Poly1305.cs     # Pure C# RFC 8439 AEAD cipher with zero-alloc integer limb Poly1305
